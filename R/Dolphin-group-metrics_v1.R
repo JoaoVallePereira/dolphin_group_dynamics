@@ -1050,3 +1050,4 @@ if (!is.null(test$window_metrics) && nrow(test$window_metrics) > 1) {
 cor_matrix <- plot_metric_correlations(test$frame_metrics, 
                                        output_file = "metric_correlations.png")
 print("Correlation matrix:")
+print(round(cor_matrix, 2))
