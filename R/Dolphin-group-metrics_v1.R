@@ -1,7 +1,7 @@
 # dolphin_group_metrics.R
 # title: "Dolphin-group-dynamics-metrics"
-# author: "Mauricio Cantor"
-# date: "2025-11-26, 27"
+# author: "Mauricio Cantor and João Valle-Pereira"
+# date: "2025-11-26, 27", 2025-12-02"
 #
 # Modular pipeline to compute group-level metrics from drone detections.
 #
@@ -28,6 +28,8 @@ library(zoo)
 library(igraph)    
 library(viridis)   
 library(patchwork) 
+
+
 
 
 # safe_chull_area:
@@ -160,7 +162,39 @@ compute_centroid_distance_frame <- function(points_df) {
   return(mean(dists))
 }
 
-# 5. Minimum Spanning Tree (MST) mean edge length
+# 5. Standard Distance (SD)
+# Formula: SD = sqrt[(Σ(xi - x̄)²)/(n-1) + (Σ(yi - ȳ)²)/(n-1)]
+# Rationale: measures group spread from centroid, combining x and y deviations.
+# Biological meaning: lower SD = tighter clustering around center; higher SD = more dispersed.
+# Reference: Proposed metrics from research framework PDF
+compute_standard_distance_frame <- function(points_df) {
+  pts <- points_df %>% select(CenterX_m, CenterY_m) %>% drop_na()
+  n <- nrow(pts)
+  if (n < 2) return(NA_real_)
+  cx <- mean(pts$CenterX_m)
+  cy <- mean(pts$CenterY_m)
+  sd_x <- sum((pts$CenterX_m - cx)^2) / (n - 1)
+  sd_y <- sum((pts$CenterY_m - cy)^2) / (n - 1)
+  return(sqrt(sd_x + sd_y))
+}
+
+# 6. Dispersion Index
+# Formula: Dispersion = MaxDistance_m / Mean_Distance_m
+# Rationale: ratio of maximum to mean distance, indicates evenness of spacing.
+# Biological meaning: higher values = more dispersed/uneven groups.
+# Reference: Proposed metrics from research framework PDF
+compute_dispersion_index_frame <- function(points_df) {
+  pts <- points_df %>% select(CenterX_m, CenterY_m) %>% drop_na()
+  n <- nrow(pts)
+  if (n < 2) return(NA_real_)
+  dmat <- as.matrix(dist(as.matrix(pts)))
+  max_dist <- max(dmat)
+  mean_dist <- mean(dmat[lower.tri(dmat)])
+  if (mean_dist == 0) return(NA_real_)
+  return(max_dist / mean_dist)
+}
+
+# 7. Minimum Spanning Tree (MST) mean edge length
 # Formula: construct MST on pairwise distances; MST_mean = mean(edge lengths)
 # Rationale: captures topological connectedness, robust to outliers.
 # Biological meaning: low MST mean suggests close functional connectivity among individuals.
@@ -176,7 +210,7 @@ compute_mst_mean_frame <- function(points_df) {
   return(mean(weights))
 }
 
-# 6. Heading Similarity / Directional Coordination
+# 8. Heading Similarity / Directional Coordination
 # We compute two related measures:
 #  - Heading_MRL: mean resultant length (MRL) of unit heading vectors (range 0..1)
 #    Formula: R = || sum_i (u_i) || / n, where u_i = unit vector of heading angle
@@ -207,7 +241,7 @@ compute_heading_similarity_frame <- function(points_df, angle_col = "MovingAvgAn
   return(list(MRL = R, PairwiseSim = pairwise_sim))
 }
 
-# 7. Breathing / Surfacing Synchrony
+# 9. Breathing / Surfacing Synchrony
 # Input: either a dedicated Breath column (binary 0/1), or we use presence (detected => 1) as proxy.
 # Per-frame synchrony S(t) = fraction of dyads that share the same binary state (0 or 1).
 # Range 0..1, where 1 = all same state (all up or all down).
@@ -232,6 +266,156 @@ compute_breathing_synchrony_frame <- function(points_df, breath_col = NULL) {
     }
   }
   return(eq_pairs / tot_pairs)
+}
+
+# 10. Synchrony Index (pairwise heading synchrony)
+# Formula: Synchrony = Σ cos(θᵢ - θⱼ) / (n(n-1)/2)
+# Rationale: calculates mean cosine of angular differences between all pairs.
+# Biological meaning: values near 1 indicate high synchrony; can be calculated for different time windows.
+# Reference: Proposed metrics from research framework PDF
+compute_synchrony_index_frame <- function(points_df, angle_col = "MovingAvgAngle_deg") {
+  if (!(angle_col %in% names(points_df))) return(NA_real_)
+  angs <- points_df[[angle_col]] %>% na.omit() %>% as.numeric()
+  n <- length(angs)
+  if (n < 2) return(NA_real_)
+  
+  rads <- angs * pi / 180
+  # Compute pairwise cosine of differences
+  sync_sum <- 0
+  count <- 0
+  for (i in 1:(n-1)) {
+    for (j in (i+1):n) {
+      sync_sum <- sync_sum + cos(rads[i] - rads[j])
+      count <- count + 1
+    }
+  }
+  return(sync_sum / count)
+}
+
+# 11. Circular Variance
+# Formula: Circular_Variance = 1 - R̄, where R̄ = sqrt[(Σcos(θᵢ))² + (Σsin(θᵢ))²]/n
+# Rationale: measures dispersion of heading angles; inverse of mean resultant length.
+# Biological meaning: lower variance = higher coordination; 0 = perfect alignment, 1 = random directions.
+# Reference: Proposed metrics from research framework PDF
+compute_circular_variance_frame <- function(points_df, angle_col = "MovingAvgAngle_deg") {
+  if (!(angle_col %in% names(points_df))) return(NA_real_)
+  angs <- points_df[[angle_col]] %>% na.omit() %>% as.numeric()
+  n <- length(angs)
+  if (n == 0) return(NA_real_)
+  
+  rads <- angs * pi / 180
+  R <- sqrt((sum(cos(rads)))^2 + (sum(sin(rads)))^2) / n
+  return(1 - R)
+}
+
+# 12. Angular Velocity (mean turning rate per frame)
+# Formula: Angular_Velocity = |θₜ - θₜ₋₁| / Δt
+# Rationale: indicates turning rate and behavioral flexibility; requires ordered data per individual.
+# Biological meaning: compare between habitats (open vs. confined); higher = more turning.
+# Note: This computes per-individual angular changes within a frame if multiple angles exist.
+# Reference: Proposed metrics from research framework PDF
+compute_angular_velocity_frame <- function(points_df, angle_col = "MovingAvgAngle_deg", dt = 1) {
+  if (!(angle_col %in% names(points_df))) return(NA_real_)
+  angs <- points_df[[angle_col]] %>% na.omit() %>% as.numeric()
+  n <- length(angs)
+  if (n < 2) return(NA_real_)
+  
+  # Compute angular changes (handling wraparound)
+  ang_diffs <- numeric(n-1)
+  for (i in 1:(n-1)) {
+    diff_raw <- abs(angs[i+1] - angs[i])
+    ang_diffs[i] <- ifelse(diff_raw > 180, 360 - diff_raw, diff_raw)
+  }
+  return(mean(ang_diffs) / dt)
+}
+
+# ---------------------------
+# Temporal (multi-frame) metric functions
+# ---------------------------
+
+# 13. Coordination Stability
+# Formula: Standard deviation of polarization (MRL) over a time window
+# Rationale: measures temporal stability of coordination patterns.
+# Biological meaning: lower SD = more stable coordination patterns over time.
+# Note: This is computed over a sequence of frames, not per-frame.
+# Reference: Proposed metrics from research framework PDF
+compute_coordination_stability <- function(frame_metrics, window_frames = 30) {
+  # frame_metrics should be a dataframe with Heading_MRL column
+  if (!"Heading_MRL" %in% names(frame_metrics)) return(NA_real_)
+  if (nrow(frame_metrics) < window_frames) window_frames <- nrow(frame_metrics)
+  if (window_frames < 2) return(NA_real_)
+  
+  # Use rolling window to compute stability
+  mrl_vals <- frame_metrics$Heading_MRL
+  n <- length(mrl_vals)
+  stabilities <- numeric(n - window_frames + 1)
+  
+  for (i in 1:(n - window_frames + 1)) {
+    window_vals <- mrl_vals[i:(i + window_frames - 1)]
+    stabilities[i] <- sd(window_vals, na.rm = TRUE)
+  }
+  
+  return(mean(stabilities, na.rm = TRUE))
+}
+
+# 14. Group Turning Events
+# Formula: Identify when |mean(θₜ) - mean(θₜ₋₁)| > threshold
+# Rationale: detects coordinated direction changes by the group.
+# Biological meaning: frequency and magnitude of coordinated turns may reflect habitat complexity or foraging strategy.
+# Note: This requires sequential frame data with group mean headings.
+# Reference: Proposed metrics from research framework PDF
+detect_turning_events <- function(frame_metrics, threshold_deg = 45) {
+  # frame_metrics should have FrameIndex and heading data
+  # We'll compute this from Heading_MRL direction (mean angle)
+  # For simplicity, we'll use a proxy: when Heading_MRL drops significantly between frames
+  
+  if (nrow(frame_metrics) < 2) return(list(n_events = 0, event_frames = integer(0)))
+  
+  # We need actual mean heading angle, but MRL doesn't give us direction
+  # This is a limitation - ideally we'd store mean heading angle
+  # For now, we'll detect turns as sudden drops in MRL (indicating loss of coordination)
+  
+  mrl_vals <- frame_metrics$Heading_MRL
+  mrl_changes <- abs(diff(mrl_vals))
+  
+  # Detect events where MRL changes more than a threshold (e.g., 0.3)
+  mrl_threshold <- 0.3
+  event_indices <- which(mrl_changes > mrl_threshold)
+  event_frames <- frame_metrics$FrameIndex[event_indices + 1]  # +1 because diff shortens by 1
+  
+  return(list(
+    n_events = length(event_frames),
+    event_frames = event_frames,
+    mean_mrl_change = mean(mrl_changes[event_indices], na.rm = TRUE)
+  ))
+}
+
+# 15. Persistence in Direction (Autocorrelation)
+# Formula: Calculate autocorrelation of heading angles over time
+# Rationale: higher autocorrelation = more persistent movement direction.
+# Biological meaning: may indicate different habitat navigation strategies.
+# Note: Requires sequential heading data; uses circular correlation.
+# Reference: Proposed metrics from research framework PDF
+compute_direction_persistence <- function(frame_metrics, lag = 1, angle_col = "Heading_MRL") {
+  # This is challenging with circular data
+  # We'll use a simplified approach: correlation of MRL values over time
+  # True circular autocorrelation would require individual heading angles
+  
+  if (!angle_col %in% names(frame_metrics)) return(NA_real_)
+  if (nrow(frame_metrics) < lag + 2) return(NA_real_)
+  
+  vals <- frame_metrics[[angle_col]]
+  vals <- vals[!is.na(vals)]
+  
+  if (length(vals) < lag + 2) return(NA_real_)
+  
+  # Simple lag-1 autocorrelation
+  acf_result <- tryCatch(
+    acf(vals, lag.max = lag, plot = FALSE)$acf[lag + 1],
+    error = function(e) NA_real_
+  )
+  
+  return(acf_result)
 }
 
 # ---------------------------
@@ -261,21 +445,28 @@ compute_metrics_per_frame <- function(df_interp,
     rec <- tibble(FrameIndex = f, N = N)
     if (N < Nmin) {
       rec <- rec %>% mutate(MPD = NA_real_, MNN = NA_real_, CHAI = NA_real_,
-                            CentroidDist = NA_real_, MST_mean = NA_real_,
+                            CentroidDist = NA_real_, StandardDist = NA_real_, 
+                            DispersionIndex = NA_real_, MST_mean = NA_real_,
                             Heading_MRL = NA_real_, Heading_pairSim = NA_real_,
-                            BreathSync = NA_real_)
+                            SynchronyIndex = NA_real_, CircularVariance = NA_real_,
+                            AngularVelocity = NA_real_, BreathSync = NA_real_)
     } else {
       rec <- rec %>% mutate(
         MPD = compute_mpd_frame(pts),
         MNN = compute_mnn_frame(pts),
         CHAI = compute_chai_frame(pts),
         CentroidDist = compute_centroid_distance_frame(pts),
+        StandardDist = compute_standard_distance_frame(pts),
+        DispersionIndex = compute_dispersion_index_frame(pts),
         MST_mean = compute_mst_mean_frame(pts)
       )
-      # heading
+      # heading metrics
       heading_res <- compute_heading_similarity_frame(pts, angle_col = angle_col)
       rec$Heading_MRL <- heading_res$MRL
       rec$Heading_pairSim <- heading_res$PairwiseSim
+      rec$SynchronyIndex <- compute_synchrony_index_frame(pts, angle_col = angle_col)
+      rec$CircularVariance <- compute_circular_variance_frame(pts, angle_col = angle_col)
+      rec$AngularVelocity <- compute_angular_velocity_frame(pts, angle_col = angle_col)
       # breathing/surfacing
       rec$BreathSync <- compute_breathing_synchrony_frame(sub, breath_col = breath_col)
     }
@@ -305,20 +496,56 @@ sliding_window_summary <- function(frame_metrics,
     return(tibble(
       WindowStart = min(sub$FrameIndex),
       WindowEnd   = max(sub$FrameIndex),
+      N_mean = mean(sub$N, na.rm = TRUE),
       
       MPD_med = median(sub$MPD, na.rm = TRUE),
+      MPD_mean = mean(sub$MPD, na.rm = TRUE),
       MPD_sd = sd(sub$MPD, na.rm = TRUE),
+      MPD_min = min(sub$MPD, na.rm = TRUE),
+      MPD_max = max(sub$MPD, na.rm = TRUE),
+      
       MNN_med = median(sub$MNN, na.rm = TRUE),
+      MNN_mean = mean(sub$MNN, na.rm = TRUE),
       MNN_sd = sd(sub$MNN, na.rm = TRUE),
+      
       CHAI_med = median(sub$CHAI, na.rm = TRUE),
+      CHAI_mean = mean(sub$CHAI, na.rm = TRUE),
       CHAI_sd = sd(sub$CHAI, na.rm = TRUE),
+      
       CentroidDist_med = median(sub$CentroidDist, na.rm = TRUE),
+      CentroidDist_mean = mean(sub$CentroidDist, na.rm = TRUE),
       CentroidDist_sd = sd(sub$CentroidDist, na.rm = TRUE),
+      
+      StandardDist_med = median(sub$StandardDist, na.rm = TRUE),
+      StandardDist_mean = mean(sub$StandardDist, na.rm = TRUE),
+      StandardDist_sd = sd(sub$StandardDist, na.rm = TRUE),
+      
+      DispersionIndex_med = median(sub$DispersionIndex, na.rm = TRUE),
+      DispersionIndex_mean = mean(sub$DispersionIndex, na.rm = TRUE),
+      DispersionIndex_sd = sd(sub$DispersionIndex, na.rm = TRUE),
+      
       MST_med = median(sub$MST_mean, na.rm = TRUE),
+      MST_mean = mean(sub$MST_mean, na.rm = TRUE),
       MST_sd = sd(sub$MST_mean, na.rm = TRUE),
+      
       Heading_MRL_med = median(sub$Heading_MRL, na.rm = TRUE),
+      Heading_MRL_mean = mean(sub$Heading_MRL, na.rm = TRUE),
       Heading_MRL_sd = sd(sub$Heading_MRL, na.rm = TRUE),
+      
+      SynchronyIndex_med = median(sub$SynchronyIndex, na.rm = TRUE),
+      SynchronyIndex_mean = mean(sub$SynchronyIndex, na.rm = TRUE),
+      SynchronyIndex_sd = sd(sub$SynchronyIndex, na.rm = TRUE),
+      
+      CircularVariance_med = median(sub$CircularVariance, na.rm = TRUE),
+      CircularVariance_mean = mean(sub$CircularVariance, na.rm = TRUE),
+      CircularVariance_sd = sd(sub$CircularVariance, na.rm = TRUE),
+      
+      AngularVelocity_med = median(sub$AngularVelocity, na.rm = TRUE),
+      AngularVelocity_mean = mean(sub$AngularVelocity, na.rm = TRUE),
+      AngularVelocity_sd = sd(sub$AngularVelocity, na.rm = TRUE),
+      
       BreathSync_med = median(sub$BreathSync, na.rm = TRUE),
+      BreathSync_mean = mean(sub$BreathSync, na.rm = TRUE),
       BreathSync_sd = sd(sub$BreathSync, na.rm = TRUE)
     ))
   }
@@ -343,20 +570,56 @@ sliding_window_summary <- function(frame_metrics,
     rec <- tibble(
       WindowStart = s,
       WindowEnd = e,
+      N_mean = mean(sub$N, na.rm = TRUE),
       
       MPD_med = median(sub$MPD, na.rm = TRUE),
+      MPD_mean = mean(sub$MPD, na.rm = TRUE),
       MPD_sd = sd(sub$MPD, na.rm = TRUE),
+      MPD_min = min(sub$MPD, na.rm = TRUE),
+      MPD_max = max(sub$MPD, na.rm = TRUE),
+      
       MNN_med = median(sub$MNN, na.rm = TRUE),
+      MNN_mean = mean(sub$MNN, na.rm = TRUE),
       MNN_sd = sd(sub$MNN, na.rm = TRUE),
+      
       CHAI_med = median(sub$CHAI, na.rm = TRUE),
+      CHAI_mean = mean(sub$CHAI, na.rm = TRUE),
       CHAI_sd = sd(sub$CHAI, na.rm = TRUE),
+      
       CentroidDist_med = median(sub$CentroidDist, na.rm = TRUE),
+      CentroidDist_mean = mean(sub$CentroidDist, na.rm = TRUE),
       CentroidDist_sd = sd(sub$CentroidDist, na.rm = TRUE),
+      
+      StandardDist_med = median(sub$StandardDist, na.rm = TRUE),
+      StandardDist_mean = mean(sub$StandardDist, na.rm = TRUE),
+      StandardDist_sd = sd(sub$StandardDist, na.rm = TRUE),
+      
+      DispersionIndex_med = median(sub$DispersionIndex, na.rm = TRUE),
+      DispersionIndex_mean = mean(sub$DispersionIndex, na.rm = TRUE),
+      DispersionIndex_sd = sd(sub$DispersionIndex, na.rm = TRUE),
+      
       MST_med = median(sub$MST_mean, na.rm = TRUE),
+      MST_mean = mean(sub$MST_mean, na.rm = TRUE),
       MST_sd = sd(sub$MST_mean, na.rm = TRUE),
+      
       Heading_MRL_med = median(sub$Heading_MRL, na.rm = TRUE),
+      Heading_MRL_mean = mean(sub$Heading_MRL, na.rm = TRUE),
       Heading_MRL_sd = sd(sub$Heading_MRL, na.rm = TRUE),
+      
+      SynchronyIndex_med = median(sub$SynchronyIndex, na.rm = TRUE),
+      SynchronyIndex_mean = mean(sub$SynchronyIndex, na.rm = TRUE),
+      SynchronyIndex_sd = sd(sub$SynchronyIndex, na.rm = TRUE),
+      
+      CircularVariance_med = median(sub$CircularVariance, na.rm = TRUE),
+      CircularVariance_mean = mean(sub$CircularVariance, na.rm = TRUE),
+      CircularVariance_sd = sd(sub$CircularVariance, na.rm = TRUE),
+      
+      AngularVelocity_med = median(sub$AngularVelocity, na.rm = TRUE),
+      AngularVelocity_mean = mean(sub$AngularVelocity, na.rm = TRUE),
+      AngularVelocity_sd = sd(sub$AngularVelocity, na.rm = TRUE),
+      
       BreathSync_med = median(sub$BreathSync, na.rm = TRUE),
+      BreathSync_mean = mean(sub$BreathSync, na.rm = TRUE),
       BreathSync_sd = sd(sub$BreathSync, na.rm = TRUE)
     )
     
@@ -534,31 +797,31 @@ compute_group_metrics <- function(csv_path,
 # TESTING
 # --------------
 
-csv_file = '/Users/nevescam/Library/CloudStorage/OneDrive-OregonStateUniversity/Professor/LABERINT/STUDENTS/JuliaPierry/Julia-videoAI-analyses/E04_BN01_12dez23_(1)_corte_3_output.csv'
+csv_file = "C:/Users/dovallej/OneDrive - Oregon State University/R_projects/dolphin_group_dynamics/data/raw/E16_SB02_14fev25_(1)_corte_106_output.csv"
 
 test = compute_group_metrics(csv_path = csv_file,
-                      # should output summary for the whole video? (that is, 1 single sliding window)
-                      whole_video = TRUE,
-                      # If not, then define these parameters for sliding window analyses:
-                        # default frames per second should be 30, but check with exiftool
-                        fps = 30, 
-                        # whether to summarize metrics per sliding window
-                        sliding = TRUE, 
-                        # length, in secs, of sliding window of analyses; ==NA, if whole_video=TRUE or
-                        window_sec = 10,  
-                        # how many frames to jump between windows
-                        slide_step_frames = NULL,
-                      # interpolation of detections per frame to smooth out misdetections; ==0 to use csv as is
-                      interp_gap = 0, 
-                      # minimum number of detections to calculate metrics (Nmin=1 to include all individuals)
-                      Nmin = 1,
-                      # for angle analyses, give the column names if present
-                      angle_col = "MovingAvgAngle_deg",
-                      # for breath sync analyses, give column name it present 
-                      # (normally no pre-defined breath variable, so this will be computed from detections)
-                      breath_col = NULL, 
-                      # should summary be plotted? (doesnt work all the time)
-                      return_plots = FALSE)
+                             # should output summary for the whole video? (that is, 1 single sliding window)
+                             whole_video = TRUE,
+                             # If not, then define these parameters for sliding window analyses:
+                             # default frames per second should be 30, but check with exiftool
+                             fps = 30, 
+                             # whether to summarize metrics per sliding window
+                             sliding = TRUE, 
+                             # length, in secs, of sliding window of analyses; ==NA, if whole_video=TRUE or
+                             window_sec = 10,  
+                             # how many frames to jump between windows
+                             slide_step_frames = NULL,
+                             # interpolation of detections per frame to smooth out misdetections; ==0 to use csv as is
+                             interp_gap = 0, 
+                             # minimum number of detections to calculate metrics (Nmin=1 to include all individuals)
+                             Nmin = 1,
+                             # for angle analyses, give the column names if present
+                             angle_col = "MovingAvgAngle_deg",
+                             # for breath sync analyses, give column name it present 
+                             # (normally no pre-defined breath variable, so this will be computed from detections)
+                             breath_col = NULL, 
+                             # should summary be plotted? (doesnt work all the time)
+                             return_plots = FALSE)
 
 str(test)
 
@@ -596,19 +859,194 @@ file_list <- list.files(path = folder_path,
 data_list <- lapply(file_list, read.csv)
 
 # Loop metric function across files, saving only the dataframes with the aggregated metrics per entire videos
- 
+
 result_list = list()
 
 for(i in length(data_list)){
   result_list[[i]] = compute_group_metrics(csv_path = data_list[[i]],
-                      whole_video = TRUE,
-                      fps = 30, 
-                      sliding = FALSE, 
-                      window_sec = NA,  
-                      slide_step_frames = NULL,
-                      interp_gap = 0, 
-                      Nmin = 1,
-                      angle_col = "MovingAvgAngle_deg",
-                      breath_col = NULL, 
-                      return_plots = FALSE)
+                                           whole_video = TRUE,
+                                           fps = 30, 
+                                           sliding = FALSE, 
+                                           window_sec = NA,  
+                                           slide_step_frames = NULL,
+                                           interp_gap = 0, 
+                                           Nmin = 1,
+                                           angle_col = "MovingAvgAngle_deg",
+                                           breath_col = NULL, 
+                                           return_plots = FALSE)
 }
+
+
+
+# --------------
+# EXAMPLE: Plot all metrics
+# --------------
+
+# ---------------------------
+# Comprehensive plotting function for all metrics
+# ---------------------------
+
+plot_all_metrics <- function(frame_metrics, window_metrics = NULL, output_file = NULL) {
+  library(patchwork)
+  
+  # 1. Cohesion metrics over time
+  p1 <- frame_metrics %>%
+    select(FrameIndex, MPD, MNN, StandardDist) %>%
+    pivot_longer(-FrameIndex, names_to = "Metric", values_to = "Value") %>%
+    ggplot(aes(x = FrameIndex, y = Value, color = Metric)) +
+    geom_line(alpha = 0.7) +
+    labs(title = "Cohesion Metrics", y = "Distance (m)") +
+    theme_minimal()
+  
+  # 2. Normalized cohesion metrics
+  p2 <- frame_metrics %>%
+    select(FrameIndex, CHAI, DispersionIndex) %>%
+    pivot_longer(-FrameIndex, names_to = "Metric", values_to = "Value") %>%
+    ggplot(aes(x = FrameIndex, y = Value, color = Metric)) +
+    geom_line(alpha = 0.7) +
+    labs(title = "Normalized Cohesion", y = "Value") +
+    theme_minimal()
+  
+  # 3. Coordination metrics
+  p3 <- frame_metrics %>%
+    select(FrameIndex, Heading_MRL, CircularVariance) %>%
+    pivot_longer(-FrameIndex, names_to = "Metric", values_to = "Value") %>%
+    ggplot(aes(x = FrameIndex, y = Value, color = Metric)) +
+    geom_line(alpha = 0.7) +
+    labs(title = "Coordination (MRL vs Variance)", y = "Value (0-1)") +
+    theme_minimal()
+  
+  # 4. Synchrony metrics
+  p4 <- frame_metrics %>%
+    select(FrameIndex, SynchronyIndex, Heading_pairSim) %>%
+    pivot_longer(-FrameIndex, names_to = "Metric", values_to = "Value") %>%
+    ggplot(aes(x = FrameIndex, y = Value, color = Metric)) +
+    geom_line(alpha = 0.7) +
+    labs(title = "Synchrony Measures", y = "Value") +
+    theme_minimal()
+  
+  # 5. Angular velocity
+  p5 <- ggplot(frame_metrics, aes(x = FrameIndex, y = AngularVelocity)) +
+    geom_line(color = "darkblue", alpha = 0.7) +
+    labs(title = "Angular Velocity", y = "Degrees/frame") +
+    theme_minimal()
+  
+  # 6. Group size over time
+  p6 <- ggplot(frame_metrics, aes(x = FrameIndex, y = N)) +
+    geom_line(color = "darkgreen", alpha = 0.7) +
+    labs(title = "Group Size", y = "N individuals") +
+    theme_minimal()
+  
+  # Combine plots
+  combined <- (p1 + p2) / (p3 + p4) / (p5 + p6)
+  combined <- combined + plot_annotation(
+    title = "Dolphin Group Metrics - Complete Overview",
+    theme = theme(plot.title = element_text(size = 16, face = "bold"))
+  )
+  
+  # Save if output file specified
+  if (!is.null(output_file)) {
+    ggsave(output_file, combined, width = 14, height = 12, dpi = 300)
+    cat(paste("Plot saved to:", output_file, "\n"))
+  }
+  
+  return(combined)
+}
+
+# Function to plot window summaries
+plot_window_summaries <- function(window_metrics, output_file = NULL) {
+  
+  # 1. Cohesion metrics with error bands
+  p1 <- ggplot(window_metrics, aes(x = WindowStart)) +
+    geom_line(aes(y = MPD_mean, color = "MPD")) +
+    geom_ribbon(aes(ymin = MPD_mean - MPD_sd, ymax = MPD_mean + MPD_sd), alpha = 0.2) +
+    geom_line(aes(y = StandardDist_mean, color = "StandardDist")) +
+    geom_ribbon(aes(ymin = StandardDist_mean - StandardDist_sd, 
+                    ymax = StandardDist_mean + StandardDist_sd), alpha = 0.2) +
+    labs(title = "Cohesion Metrics (Windowed)", y = "Distance (m)", color = "Metric") +
+    theme_minimal()
+  
+  # 2. Coordination with variability
+  p2 <- ggplot(window_metrics, aes(x = WindowStart)) +
+    geom_line(aes(y = Heading_MRL_mean, color = "MRL")) +
+    geom_ribbon(aes(ymin = Heading_MRL_mean - Heading_MRL_sd, 
+                    ymax = Heading_MRL_mean + Heading_MRL_sd), alpha = 0.2) +
+    geom_line(aes(y = CircularVariance_mean, color = "CircVar")) +
+    geom_ribbon(aes(ymin = CircularVariance_mean - CircularVariance_sd, 
+                    ymax = CircularVariance_mean + CircularVariance_sd), alpha = 0.2) +
+    labs(title = "Coordination Metrics (Windowed)", y = "Value (0-1)", color = "Metric") +
+    theme_minimal()
+  
+  # 3. Angular velocity
+  p3 <- ggplot(window_metrics, aes(x = WindowStart)) +
+    geom_line(aes(y = AngularVelocity_mean), color = "darkblue") +
+    geom_ribbon(aes(ymin = AngularVelocity_mean - AngularVelocity_sd, 
+                    ymax = AngularVelocity_mean + AngularVelocity_sd), alpha = 0.2) +
+    labs(title = "Angular Velocity (Windowed)", y = "Degrees/frame") +
+    theme_minimal()
+  
+  # 4. Group size
+  p4 <- ggplot(window_metrics, aes(x = WindowStart, y = N_mean)) +
+    geom_line(color = "darkgreen") +
+    labs(title = "Mean Group Size (Windowed)", y = "N individuals") +
+    theme_minimal()
+  
+  combined <- (p1 + p2) / (p3 + p4)
+  combined <- combined + plot_annotation(
+    title = "Window-Level Metric Summaries",
+    theme = theme(plot.title = element_text(size = 16, face = "bold"))
+  )
+  
+  if (!is.null(output_file)) {
+    ggsave(output_file, combined, width = 14, height = 10, dpi = 300)
+    cat(paste("Plot saved to:", output_file, "\n"))
+  }
+  
+  return(combined)
+}
+
+# Function to create correlation plot of all metrics
+plot_metric_correlations <- function(frame_metrics, output_file = NULL) {
+  library(corrplot)
+  
+  cor_data <- frame_metrics %>%
+    select(MPD, MNN, CHAI, CentroidDist, StandardDist, DispersionIndex, MST_mean,
+           Heading_MRL, Heading_pairSim, SynchronyIndex, CircularVariance, 
+           AngularVelocity) %>%
+    cor(use = "complete.obs", method = "spearman")
+  
+  if (!is.null(output_file)) {
+    png(output_file, width = 10, height = 10, units = "in", res = 300)
+    corrplot(cor_data, method = "color", type = "upper", 
+             addCoef.col = "black", number.cex = 0.6,
+             tl.col = "black", tl.srt = 45, tl.cex = 0.8,
+             title = "Metric Correlations (Spearman)", mar = c(0,0,2,0))
+    dev.off()
+    cat(paste("Correlation plot saved to:", output_file, "\n"))
+  } else {
+    corrplot(cor_data, method = "color", type = "upper", 
+             addCoef.col = "black", number.cex = 0.6,
+             tl.col = "black", tl.srt = 45, tl.cex = 0.8,
+             title = "Metric Correlations (Spearman)", mar = c(0,0,2,0))
+  }
+  
+  return(cor_data)
+}
+
+# Usage example (add after your test = compute_group_metrics(...) code):
+# Plot all frame-level metrics
+all_metrics_plot <- plot_all_metrics(test$frame_metrics, 
+                                     output_file = "all_metrics_overview.png")
+print(all_metrics_plot)
+
+# Plot window summaries (if using sliding windows)
+if (!is.null(test$window_metrics) && nrow(test$window_metrics) > 1) {
+  window_plot <- plot_window_summaries(test$window_metrics, 
+                                       output_file = "window_summaries.png")
+  print(window_plot)
+}
+
+# Plot correlations between metrics
+cor_matrix <- plot_metric_correlations(test$frame_metrics, 
+                                       output_file = "metric_correlations.png")
+print("Correlation matrix:")
