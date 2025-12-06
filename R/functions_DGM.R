@@ -15,7 +15,7 @@
 #  - BreathCol : name of a binary column marking surfacing/breathing (1 / 0). Presence detection will be used as a proxy.
 #
 # Defaults:
-#  fps = 30, window_sec = 5, Nmin = 2, interp_gap = 1 (frames)
+#  fps = 30, window_sec = 5, Nmin = 1, interp_gap = 1 (frames)
 #
 
 
@@ -102,6 +102,25 @@ frames_presence_matrix <- function(df_interp, id_col = "ObjectID", frame_col = "
   rownames(M) <- rownames_pres
   return(M)
 }
+
+# extract information from filed path
+extract_path_info_regex <- function(file_path) {
+  # Regex explanation:
+  # Data_processing/ matches the fixed part of the path
+  # (.*?)/           matches and captures the 'student' part (non-greedy match up to the next /)
+  # (.*?)/           matches and captures the 'site' part
+  # output/          matches the fixed 'output' folder
+  # (.*?)/           matches and captures the 'flight_altitude' part
+  pattern <- "Data_processing/(.*?)/(.*?)/output/(.*?)/"
+  
+  # str_match returns a matrix; the first column is the full match, 
+  # subsequent columns are the captured groups.
+  matches <- str_match(file_path, pattern)
+  
+  # Return the captured groups as a vector (columns 2, 3, and 4)
+  return(as.vector(matches[c(3,4)]))
+}
+
 
 
 # ---------------------------
@@ -496,13 +515,13 @@ sliding_window_summary <- function(frame_metrics,
     return(tibble(
       WindowStart = min(sub$FrameIndex),
       WindowEnd   = max(sub$FrameIndex),
+      N_med = median(sub$N, na.rm = TRUE),
       N_mean = mean(sub$N, na.rm = TRUE),
+      N_sd = sd(sub$N, na.rm = TRUE),
       
       MPD_med = median(sub$MPD, na.rm = TRUE),
       MPD_mean = mean(sub$MPD, na.rm = TRUE),
       MPD_sd = sd(sub$MPD, na.rm = TRUE),
-      MPD_min = min(sub$MPD, na.rm = TRUE),
-      MPD_max = max(sub$MPD, na.rm = TRUE),
       
       MNN_med = median(sub$MNN, na.rm = TRUE),
       MNN_mean = mean(sub$MNN, na.rm = TRUE),
@@ -550,7 +569,7 @@ sliding_window_summary <- function(frame_metrics,
     ))
   }
   
-  # OPTION 2: Sliding windows (your original code)
+  # OPTION 2: Sliding windows
   if (is.null(slide_step_frames))
     slide_step_frames <- max(1, floor((fps * window_sec) / 2))
   
@@ -570,13 +589,13 @@ sliding_window_summary <- function(frame_metrics,
     rec <- tibble(
       WindowStart = s,
       WindowEnd = e,
+      N_med = median(sub$N, na.rm = TRUE),
       N_mean = mean(sub$N, na.rm = TRUE),
+      N_sd = sd(sub$N, na.rm = TRUE),
       
       MPD_med = median(sub$MPD, na.rm = TRUE),
       MPD_mean = mean(sub$MPD, na.rm = TRUE),
       MPD_sd = sd(sub$MPD, na.rm = TRUE),
-      MPD_min = min(sub$MPD, na.rm = TRUE),
-      MPD_max = max(sub$MPD, na.rm = TRUE),
       
       MNN_med = median(sub$MNN, na.rm = TRUE),
       MNN_mean = mean(sub$MNN, na.rm = TRUE),
@@ -705,9 +724,11 @@ plot_pair_overlap_heatmap <- function(df_interp, id_col = "ObjectID", frame_col 
 # - interp_gap: pass to interpolate_tracks(); should gaps in detection be interpolated, and by how many frame?
 # - Nmin: minimum number of detections in the frame to compute the metrics; default is 2 individuals, it will be NA for a single detection
 # - angle_col, breath_col: column names if present
+# frame_selection: input: a vector with 2 values, min and max frame number. E.g. c(0, 100) to analyse only the first 100 frames of the video (ie, only the 100 rows of the csv file)
 # return_plots: FALSE/TRUE
 
 compute_group_metrics <- function(csv_path,
+                                  frame_selection = NA,
                                   fps = 30,
                                   window_sec = 5,
                                   whole_video = FALSE,
@@ -724,6 +745,12 @@ compute_group_metrics <- function(csv_path,
   missing <- setdiff(req_cols, names(df_raw))
   if (length(missing) > 0) stop(paste("Missing required columns:", paste(missing, collapse = ", ")))
   
+  # apply frame restrictions (rows)
+  if(!is.na(frame_selection[1])){
+    df_raw = df_raw[df_raw$FrameIndex>frame_selection[1] &
+                            df_raw$FrameIndex<frame_selection[2], ]
+  } 
+
   # Interpolate short gaps
   df_interp <- interpolate_tracks(df_raw,
                                   frame_col = "FrameIndex",
@@ -791,264 +818,3 @@ compute_group_metrics <- function(csv_path,
     plots = plots
   ))
 }
-
-
-# --------------
-# TESTING
-# --------------
-
-csv_file = "C:/Users/dovallej/OneDrive - Oregon State University/R_projects/dolphin_group_dynamics/data/raw/E16_SB02_14fev25_(1)_corte_106_output.csv"
-
-test = compute_group_metrics(csv_path = csv_file,
-                             # should output summary for the whole video? (that is, 1 single sliding window)
-                             whole_video = TRUE,
-                             # If not, then define these parameters for sliding window analyses:
-                             # default frames per second should be 30, but check with exiftool
-                             fps = 30, 
-                             # whether to summarize metrics per sliding window
-                             sliding = TRUE, 
-                             # length, in secs, of sliding window of analyses; ==NA, if whole_video=TRUE or
-                             window_sec = 10,  
-                             # how many frames to jump between windows
-                             slide_step_frames = NULL,
-                             # interpolation of detections per frame to smooth out misdetections; ==0 to use csv as is
-                             interp_gap = 0, 
-                             # minimum number of detections to calculate metrics (Nmin=1 to include all individuals)
-                             Nmin = 1,
-                             # for angle analyses, give the column names if present
-                             angle_col = "MovingAvgAngle_deg",
-                             # for breath sync analyses, give column name it present 
-                             # (normally no pre-defined breath variable, so this will be computed from detections)
-                             breath_col = NULL, 
-                             # should summary be plotted? (doesnt work all the time)
-                             return_plots = FALSE)
-
-str(test)
-
-#data input
-view(test[[1]])
-
-# metrics per frame
-str(test[[2]])
-as.data.frame(test$frame_metrics)
-view(test$frame_metrics)
-
-# summary metrics per X-sec window
-str(test[[3]])
-as.data.frame(test$window_metrics)
-view(test$window_metrics)
-
-test$pair_overlap_median
-test$plots
-
-
-
-
-# --------------
-# Batch processing multiple videos
-# --------------
-
-# Read all csv files in a folder
-# Example for CSV files in a folder within the current working directory
-folder_path <- "/Users/nevescam/Library/CloudStorage/OneDrive-OregonStateUniversity/Professor/LABERINT/STUDENTS/JuliaPierry/Julia-videoAI-analyses/"
-file_list <- list.files(path = folder_path,
-                        pattern = "\\.csv$",
-                        full.names = TRUE)
-
-# Loop metric function across files, saving only the dataframes with the aggregated metrics per entire videos
-for(i in 1:length(file_list)){
-  aux1 = compute_group_metrics(csv_path = file_list[[i]],
-                               whole_video = TRUE,
-                               fps = 30, 
-                               sliding = TRUE, 
-                               window_sec = NA,  
-                               slide_step_frames = NULL,
-                               interp_gap = 0, 
-                               Nmin = 1,
-                               angle_col = "MovingAvgAngle_deg",
-                               breath_col = NULL, 
-                               return_plots = FALSE)
-  # add video name and save
-  aux2 = cbind(Video = gsub("_output.csv", "", names(data_list)[i]),
-               aux1$window_metrics)
-  result_list[[i]] = aux2
-}
-
-# Combine all into a dataframe
-result_full_videos = as.data.frame(dplyr::bind_rows(result_list))
-
-
-
-# --------------
-# EXAMPLE: Plot all metrics
-# --------------
-
-# ---------------------------
-# Comprehensive plotting function for all metrics
-# ---------------------------
-
-plot_all_metrics <- function(frame_metrics, window_metrics = NULL, output_file = NULL) {
-  library(patchwork)
-  
-  # 1. Cohesion metrics over time
-  p1 <- frame_metrics %>%
-    select(FrameIndex, MPD, MNN, StandardDist) %>%
-    pivot_longer(-FrameIndex, names_to = "Metric", values_to = "Value") %>%
-    ggplot(aes(x = FrameIndex, y = Value, color = Metric)) +
-    geom_line(alpha = 0.7) +
-    labs(title = "Cohesion Metrics", y = "Distance (m)") +
-    theme_minimal()
-  
-  # 2. Normalized cohesion metrics
-  p2 <- frame_metrics %>%
-    select(FrameIndex, CHAI, DispersionIndex) %>%
-    pivot_longer(-FrameIndex, names_to = "Metric", values_to = "Value") %>%
-    ggplot(aes(x = FrameIndex, y = Value, color = Metric)) +
-    geom_line(alpha = 0.7) +
-    labs(title = "Normalized Cohesion", y = "Value") +
-    theme_minimal()
-  
-  # 3. Coordination metrics
-  p3 <- frame_metrics %>%
-    select(FrameIndex, Heading_MRL, CircularVariance) %>%
-    pivot_longer(-FrameIndex, names_to = "Metric", values_to = "Value") %>%
-    ggplot(aes(x = FrameIndex, y = Value, color = Metric)) +
-    geom_line(alpha = 0.7) +
-    labs(title = "Coordination (MRL vs Variance)", y = "Value (0-1)") +
-    theme_minimal()
-  
-  # 4. Synchrony metrics
-  p4 <- frame_metrics %>%
-    select(FrameIndex, SynchronyIndex, Heading_pairSim) %>%
-    pivot_longer(-FrameIndex, names_to = "Metric", values_to = "Value") %>%
-    ggplot(aes(x = FrameIndex, y = Value, color = Metric)) +
-    geom_line(alpha = 0.7) +
-    labs(title = "Synchrony Measures", y = "Value") +
-    theme_minimal()
-  
-  # 5. Angular velocity
-  p5 <- ggplot(frame_metrics, aes(x = FrameIndex, y = AngularVelocity)) +
-    geom_line(color = "darkblue", alpha = 0.7) +
-    labs(title = "Angular Velocity", y = "Degrees/frame") +
-    theme_minimal()
-  
-  # 6. Group size over time
-  p6 <- ggplot(frame_metrics, aes(x = FrameIndex, y = N)) +
-    geom_line(color = "darkgreen", alpha = 0.7) +
-    labs(title = "Group Size", y = "N individuals") +
-    theme_minimal()
-  
-  # Combine plots
-  combined <- (p1 + p2) / (p3 + p4) / (p5 + p6)
-  combined <- combined + plot_annotation(
-    title = "Dolphin Group Metrics - Complete Overview",
-    theme = theme(plot.title = element_text(size = 16, face = "bold"))
-  )
-  
-  # Save if output file specified
-  if (!is.null(output_file)) {
-    ggsave(output_file, combined, width = 14, height = 12, dpi = 300)
-    cat(paste("Plot saved to:", output_file, "\n"))
-  }
-  
-  return(combined)
-}
-
-# Function to plot window summaries
-plot_window_summaries <- function(window_metrics, output_file = NULL) {
-  
-  # 1. Cohesion metrics with error bands
-  p1 <- ggplot(window_metrics, aes(x = WindowStart)) +
-    geom_line(aes(y = MPD_mean, color = "MPD")) +
-    geom_ribbon(aes(ymin = MPD_mean - MPD_sd, ymax = MPD_mean + MPD_sd), alpha = 0.2) +
-    geom_line(aes(y = StandardDist_mean, color = "StandardDist")) +
-    geom_ribbon(aes(ymin = StandardDist_mean - StandardDist_sd, 
-                    ymax = StandardDist_mean + StandardDist_sd), alpha = 0.2) +
-    labs(title = "Cohesion Metrics (Windowed)", y = "Distance (m)", color = "Metric") +
-    theme_minimal()
-  
-  # 2. Coordination with variability
-  p2 <- ggplot(window_metrics, aes(x = WindowStart)) +
-    geom_line(aes(y = Heading_MRL_mean, color = "MRL")) +
-    geom_ribbon(aes(ymin = Heading_MRL_mean - Heading_MRL_sd, 
-                    ymax = Heading_MRL_mean + Heading_MRL_sd), alpha = 0.2) +
-    geom_line(aes(y = CircularVariance_mean, color = "CircVar")) +
-    geom_ribbon(aes(ymin = CircularVariance_mean - CircularVariance_sd, 
-                    ymax = CircularVariance_mean + CircularVariance_sd), alpha = 0.2) +
-    labs(title = "Coordination Metrics (Windowed)", y = "Value (0-1)", color = "Metric") +
-    theme_minimal()
-  
-  # 3. Angular velocity
-  p3 <- ggplot(window_metrics, aes(x = WindowStart)) +
-    geom_line(aes(y = AngularVelocity_mean), color = "darkblue") +
-    geom_ribbon(aes(ymin = AngularVelocity_mean - AngularVelocity_sd, 
-                    ymax = AngularVelocity_mean + AngularVelocity_sd), alpha = 0.2) +
-    labs(title = "Angular Velocity (Windowed)", y = "Degrees/frame") +
-    theme_minimal()
-  
-  # 4. Group size
-  p4 <- ggplot(window_metrics, aes(x = WindowStart, y = N_mean)) +
-    geom_line(color = "darkgreen") +
-    labs(title = "Mean Group Size (Windowed)", y = "N individuals") +
-    theme_minimal()
-  
-  combined <- (p1 + p2) / (p3 + p4)
-  combined <- combined + plot_annotation(
-    title = "Window-Level Metric Summaries",
-    theme = theme(plot.title = element_text(size = 16, face = "bold"))
-  )
-  
-  if (!is.null(output_file)) {
-    ggsave(output_file, combined, width = 14, height = 10, dpi = 300)
-    cat(paste("Plot saved to:", output_file, "\n"))
-  }
-  
-  return(combined)
-}
-
-# Function to create correlation plot of all metrics
-plot_metric_correlations <- function(frame_metrics, output_file = NULL) {
-  library(corrplot)
-  
-  cor_data <- frame_metrics %>%
-    select(MPD, MNN, CHAI, CentroidDist, StandardDist, DispersionIndex, MST_mean,
-           Heading_MRL, Heading_pairSim, SynchronyIndex, CircularVariance, 
-           AngularVelocity) %>%
-    cor(use = "complete.obs", method = "spearman")
-  
-  if (!is.null(output_file)) {
-    png(output_file, width = 10, height = 10, units = "in", res = 300)
-    corrplot(cor_data, method = "color", type = "upper", 
-             addCoef.col = "black", number.cex = 0.6,
-             tl.col = "black", tl.srt = 45, tl.cex = 0.8,
-             title = "Metric Correlations (Spearman)", mar = c(0,0,2,0))
-    dev.off()
-    cat(paste("Correlation plot saved to:", output_file, "\n"))
-  } else {
-    corrplot(cor_data, method = "color", type = "upper", 
-             addCoef.col = "black", number.cex = 0.6,
-             tl.col = "black", tl.srt = 45, tl.cex = 0.8,
-             title = "Metric Correlations (Spearman)", mar = c(0,0,2,0))
-  }
-  
-  return(cor_data)
-}
-
-# Usage example (add after your test = compute_group_metrics(...) code):
-# Plot all frame-level metrics
-all_metrics_plot <- plot_all_metrics(test$frame_metrics, 
-                                     output_file = "all_metrics_overview.png")
-print(all_metrics_plot)
-
-# Plot window summaries (if using sliding windows)
-if (!is.null(test$window_metrics) && nrow(test$window_metrics) > 1) {
-  window_plot <- plot_window_summaries(test$window_metrics, 
-                                       output_file = "window_summaries.png")
-  print(window_plot)
-}
-
-# Plot correlations between metrics
-cor_matrix <- plot_metric_correlations(test$frame_metrics, 
-                                       output_file = "metric_correlations.png")
-print("Correlation matrix:")
-print(round(cor_matrix, 2))
