@@ -19,16 +19,19 @@ csv_file = "/Volumes/LABIRINTO/Data_processing/JuliaPierry/Cananeia/output/20m/E
 
 
 test = compute_group_metrics(csv_path = csv_file,
+                             # should process a specific set of the frames?
+                             frame_selection = NA, #c(1,1000),
                              # should output summary for the whole video? (that is, 1 single sliding window)
-                             whole_video = FALSE,
-                             # If not, then define these parameters for sliding window analyses:
-                             fps = 30, 
-                             # whether to summarize metrics per sliding window
-                             sliding = TRUE, 
-                             # length, in secs, of sliding window of analyses; ==NA, if whole_video=TRUE or
-                             window_sec = 10,  
-                             # how many frames to jump between windows
-                             slide_step_frames = NULL,
+                             whole_video = TRUE,
+                               # If not, then define these parameters for sliding window analyses:
+                                # whether to summarize metrics per sliding window
+                                sliding = FALSE, 
+                                # length, in secs, of sliding window of analyses; ==NA, if whole_video=TRUE or
+                                window_sec = 10,  
+                                # video FPS (frames per second); default frames per second should be 30, but check with exiftool
+                                fps = 30, 
+                                # how many frames to jump between windows
+                                slide_step_frames = NULL,
                              # interpolation of detections per frame to smooth out misdetections; ==0 to use csv as is
                              interp_gap = 0, 
                              # minimum number of detections to calculate metrics (Nmin=1 to include all individuals)
@@ -45,6 +48,7 @@ str(test)
 
 #data input
 view(test[[1]])
+dim(test[[1]])
 
 # metrics per frame
 str(test[[2]])
@@ -56,3 +60,33 @@ str(test[[3]])
 as.data.frame(test$window_metrics)
 view(test$window_metrics)
 
+
+# testing, manually and visually:
+aux = as.data.frame(test$frame_metrics)
+apply(aux[1:200,], 2, mean, na.rm = TRUE)
+apply(aux[1:200,], 2, sd, na.rm = TRUE)
+apply(aux[1:200,], 2, median, na.rm = TRUE)
+apply(aux[800:999,], 2, median, na.rm = TRUE)
+apply(aux[1:200,], 2, mean, na.rm = TRUE)
+apply(aux[800:999,], 2, mean, na.rm = TRUE)
+aux[887,]
+aux[162,]
+aux[1000,]
+aux[1003,]
+aux[987,]
+aux[293,]
+aux[899,]
+aux[171,]
+aux[835,]
+aux[843,]
+
+plot_timeseries_metrics(frame_metrics = aux, 
+                                    metrics = c("MPD", "MNN", "CentroidDist"), 
+                                    colours = NULL)
+
+
+
+# for Julia, the selected variables that seem to make sense are:
+# MPD and MST for spatial cohesion
+# MRL and angular velocity for heading coordination
+# Breath synchrony
