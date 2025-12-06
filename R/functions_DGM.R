@@ -15,7 +15,7 @@
 #  - BreathCol : name of a binary column marking surfacing/breathing (1 / 0). Presence detection will be used as a proxy.
 #
 # Defaults:
-#  fps = 30, window_sec = 5, Nmin = 2, interp_gap = 1 (frames)
+#  fps = 30, window_sec = 5, Nmin = 1, interp_gap = 1 (frames)
 #
 
 
@@ -102,6 +102,25 @@ frames_presence_matrix <- function(df_interp, id_col = "ObjectID", frame_col = "
   rownames(M) <- rownames_pres
   return(M)
 }
+
+# extract information from filed path
+extract_path_info_regex <- function(file_path) {
+  # Regex explanation:
+  # Data_processing/ matches the fixed part of the path
+  # (.*?)/           matches and captures the 'student' part (non-greedy match up to the next /)
+  # (.*?)/           matches and captures the 'site' part
+  # output/          matches the fixed 'output' folder
+  # (.*?)/           matches and captures the 'flight_altitude' part
+  pattern <- "Data_processing/(.*?)/(.*?)/output/(.*?)/"
+  
+  # str_match returns a matrix; the first column is the full match, 
+  # subsequent columns are the captured groups.
+  matches <- str_match(file_path, pattern)
+  
+  # Return the captured groups as a vector (columns 2, 3, and 4)
+  return(as.vector(matches[c(3,4)]))
+}
+
 
 
 # ---------------------------
